@@ -1,0 +1,380 @@
+library(corrplot)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(caret)
+library(pROC)
+library(glmnet)
+library(tidymodels)
+library(xgboost)
+library(caret)
+library(tidyverse)
+library(car)
+
+
+# Read in data
+OJ <-read.csv(url("http://data.mishra.us/files/project/OJ_data.csv"))
+
+# Convert variables to appropriate types
+OJ[2:14] <- lapply(OJ[2:14], as.numeric)
+OJ$Purchase <- as.factor(OJ$Purchase)
+
+# Check the class of the variables in the df
+sapply(OJ,class)
+
+# Summarizes distributions of the variables
+summary(OJ)
+
+# Run correlation analysis
+OJ_correlations <- cor(OJ[2:14])
+
+# Print numeric correlation values
+print(OJ_correlations)
+
+# Create correlation plot
+corrplot(OJ_correlations)
+
+# Look at differences between people who purchased Citrus Hill vs Minute Maid
+differences_summary_table <- OJ %>%
+  group_by(Purchase) %>%
+  summarize(Average_Price_CH = mean(PriceCH),
+            Average_Price_MM = mean(PriceMM),
+            Average_CH_Discount = mean(DiscCH),
+            Average_MM_Discount = mean(DiscMM),
+            Average_Customer_Loyalty_CH = mean(LoyalCH),
+            Average_Sale_Price_MM = mean(SalePriceMM),
+            Average_Sale_Price_CH = mean(SalePriceCH),
+            Average_Price_Difference = mean(PriceDiff),
+            Average_List_Price_Diff = mean(PriceCH))
+
+differences_summary_table <- as.data.frame(differences_summary_table)
+
+# Print table
+print(differences_summary_table)
+
+# Pivot the data to long format
+OJ_long <- OJ[, -c(6:7)] %>%
+  pivot_longer(cols = -c(Purchase), names_to = "Variables", values_to = "Values")
+
+# Create the boxplot
+ggplot(OJ_long, aes(x = Variables, y = Values, fill = Purchase)) +
+  geom_boxplot() +
+  scale_fill_manual(values = c("0" = "aquamarine2", "1" = "coral1"),
+                    labels = c("Minute Maid OJ", "Citrus Hill OJ")) +
+  theme(axis.text.x = element_text(size = 14),
+        axis.text.y = element_text(size = 14),
+        axis.title.y = element_text(size = 16),
+        axis.title.x = element_text(size = 16),
+        legend.title = element_text(size = 16),
+        legend.text = element_text(size = 14)) +
+  labs(x = "Variables", y = "Values", fill = "Brand Purchased") +
+  ggtitle("Variable Distributions for Customers who Purchased Different Brands")
+
+# Split into train and test
+set.seed(1242)  # set seed for reproducing the partition
+datasplit <- createDataPartition(OJ$Purchase, p = 0.8, list=FALSE)
+
+trainData_log <- OJ[datasplit,]
+testData_log <- OJ[-datasplit,]
+
+# Logistic regression with all predictors
+# Fit a logistic regression model to train data
+logistic_model_purchase <- glm(Purchase ~ ., data = trainData_log, family = binomial)
+
+# Summarize the model
+summary(logistic_model_purchase)
+
+# Measure models performance
+# Predict the purchase behavior on test set
+test_predictions <- predict(logistic_model_purchase, newdata = testData_log[-1], type = "response")
+
+# Convert predicted probabilities to "1" or "0" based on a threshold (e.g., 0.5)
+test_predictions_class <- ifelse(test_predictions > 0.5, "1", "0")
+
+# Create a confusion matrix to evaluate performance
+confusion_matrix <- table(Actual = testData_log$Purchase, Predicted = test_predictions_class)
+
+# Calculate accuracy
+accuracy <- sum(diag(confusion_matrix)) / sum(confusion_matrix)
+
+# Calculate precision
+precision <- confusion_matrix[2, 2] / sum(confusion_matrix[, 2])
+
+# Calculate recall (sensitivity)
+recall <- confusion_matrix[2, 2] / sum(confusion_matrix[2, ])
+
+# Calculate area under the curve
+roc_obj <- roc(testData_log$Purchase, test_predictions)
+auc <- auc(roc_obj)
+
+# Scale variables for lasso regression
+lasso_df_scaled <-  OJ %>%
+  mutate(PriceCH = scale(PriceCH),
+         PriceMM = scale(PriceMM),
+         DiscCH = scale(DiscCH),
+         DiscMM = scale(DiscMM),
+         LoyalCH = scale(LoyalCH),
+         SalePriceMM = scale(SalePriceMM),
+         SalePriceCH = scale(SalePriceCH),
+         PriceDiff = scale(PriceDiff),
+         PctDiscMM = scale(PctDiscMM),
+         PctDiscCH = scale(PctDiscCH),
+         ListPriceDiff = scale(ListPriceDiff))
+
+# LASSO regression to determine important predictor variables
+# Set options to prevent scientific notation and display more digits
+options(scipen = 999, digits = 5)
+
+# Create test and train data for scaled df on same split used as logistic regression
+trainData_lasso <- lasso_df_scaled[datasplit,]
+testData_lasso <- lasso_df_scaled[-datasplit,]
+
+# Selecting relevant predictors using penalized regression
+# Set target and predictor variables for lasso
+predictors <- data.matrix(lasso_df_scaled[, 2:14])
+target <- lasso_df_scaled[,1]
+
+# Run a LASSO model
+model_lasso <- glmnet(x = predictors, y = target, data = trainData_lasso, family = "binomial", alpha=1)
+
+# Determine the best lambda using cross validation
+cross_validation <- cv.glmnet(x = predictors, y = target, data = trainData_lasso, family = "binomial", alpha=1)
+
+# Create the final model after using cross validation
+final_lasso_model <- glmnet(x = predictors, y = target, data = trainData_lasso, family = "binomial", alpha=1, lambda = cross_validation$lambda.min)
+
+# Calculate the cross validated final lasso model coefficients
+lasso_model_coefficients <- coef(final_lasso_model, s = "lambda min", exact=FALSE)
+
+# Print model coefficients
+print(lasso_model_coefficients)
+
+# Predict using lasso model on test set
+lasso_model_predictions <- predict(final_lasso_model, data.matrix(testData_lasso[-1]), type = "response")
+
+# Convert predictions to dataframe
+lasso_model_predictions <- as.data.frame(lasso_model_predictions)
+
+# Make predicted probabilities a "1" or "0" based on a threshold (e.g., 0.5)
+lasso_test_predictions_class <- ifelse(lasso_model_predictions > 0.5, "1", "0")
+
+# Create a confusion matrix to evaluate performance
+lasso_confusion_matrix <- table(Actual = testData_lasso$Purchase, Predicted = lasso_test_predictions_class)
+
+# Calculate accuracy
+lasso_accuracy <- sum(diag(lasso_confusion_matrix)) / sum(lasso_confusion_matrix)
+
+# Calculate precision
+lasso_precision <- lasso_confusion_matrix[2, 2] / sum(lasso_confusion_matrix[, 2])
+
+# Calculate recall (sensitivity)
+lasso_recall <- lasso_confusion_matrix[2, 2] / sum(lasso_confusion_matrix[2, ])
+
+# Convert predicted probabilities to numeric
+lasso_test_predictions_numeric <- as.numeric(lasso_test_predictions_class)
+
+# Calculate and plot the ROC curve
+lasso_roc_obj <- roc(testData_lasso$Purchase, lasso_test_predictions_numeric)
+plot(lasso_roc_obj)
+
+# Calculate area under the curve for lasso
+lasso_auc <- auc(lasso_roc_obj)
+
+# Gradient Boosted Tree Model
+# Prepare data for XGBoost
+# Select all columns except the 'Purchase' column as features
+features <- trainData_log[, -which(names(trainData_log) == "Purchase")]
+features_test <- testData_log[, -which(names(testData_log) == "Purchase")]
+
+# Convert the Purchase column to numeric
+trainData_log$Purchase <- as.numeric(as.character(trainData_log$Purchase))
+testData_log$Purchase <- as.numeric(as.character(testData_log$Purchase))
+
+# Split data into train and test for XGBoost model
+OJ_train <- xgb.DMatrix(data = as.matrix(features), label = trainData_log$Purchase)
+OJ_test  <- xgb.DMatrix(data = as.matrix(features_test), label = testData_log$Purchase)
+
+# Use xgb.cv to run cross-validation inside xgboost
+set.seed(111111)
+bst <- xgb.cv(data = OJ_train, # Set training data
+              
+              nfold = 5, # Use 5 fold cross-validation
+              
+              eta = 0.1, # Set learning rate
+              
+              nrounds = 1000, # Set number of rounds
+              early_stopping_rounds = 50, # Set number of rounds to stop at if there is no improvement
+              
+              verbose = 1, # 1 - Prints out fit
+              nthread = 1, # Set number of parallel threads
+              print_every_n = 20, # Prints out result every 20th iteration
+              
+              objective = "binary:logistic", # Set objective
+              eval_metric = "auc",
+              eval_metric = "error") # Set evaluation metric to use
+
+# From the above we see 18 was the optimal number of iterations for our model.
+# Further tune the hyperparameters
+max_depth_vals <- c(3, 5, 7, 10, 15) # Create vector of max depth values
+min_child_weight <- c(1,3,5,7, 10, 15) # Create vector of min child values
+
+# Expand grid of parameter values
+cv_params <- expand.grid(max_depth_vals, min_child_weight)
+names(cv_params) <- c("max_depth", "min_child_weight")
+# Create results vector
+auc_vec <- error_vec <- rep(NA, nrow(cv_params)) 
+# Loop through results
+for(i in 1:nrow(cv_params)){
+  set.seed(111111)
+  bst_tune <- xgb.cv(data = OJ_train, # Set training data
+                     
+                     nfold = 5, # Use 5 fold cross-validation
+                     
+                     eta = 0.1, # Set learning rate
+                     max.depth = cv_params$max_depth[i], # Set max depth
+                     min_child_weight = cv_params$min_child_weight[i], # Set minimum number of samples in node to split
+                     
+                     
+                     nrounds = 100, # Set number of rounds
+                     early_stopping_rounds = 20, # Set number of rounds to stop at if there is no improvement
+                     
+                     verbose = 1, # 1 - Prints out fit
+                     nthread = 1, # Set number of parallel threads
+                     print_every_n = 20, # Prints out result every 20th iteration
+                     
+                     objective = "binary:logistic", # Set objective
+                     eval_metric = "auc", # Set evaluation metric to use
+                     eval_metric = "error") # Set evaluation metric to use
+  auc_vec[i] <- bst_tune$evaluation_log$test_auc_mean[bst_tune$best_ntreelimit]
+  error_vec[i] <- bst_tune$evaluation_log$test_error_mean[bst_tune$best_ntreelimit]
+  
+}
+
+# Join results in dataset
+res_db <- cbind.data.frame(cv_params, auc_vec, error_vec)
+names(res_db)[3:4] <- c("auc", "error") 
+res_db$max_depth <- as.factor(res_db$max_depth) # Convert tree number to factor for plotting
+res_db$min_child_weight <- as.factor(res_db$min_child_weight) # Convert node size to factor for plotting
+# Print AUC heatmap
+g_2 <- ggplot(res_db, aes(y = max_depth, x = min_child_weight, fill = auc)) + # set aesthetics
+  geom_tile() + # Use geom_tile for heatmap
+  theme_bw() + # Set theme
+  scale_fill_gradient2(low = "blue", # Choose low color
+                       mid = "white", # Choose mid color
+                       high = "red", # Choose high color
+                       midpoint =mean(res_db$auc), # Choose mid point
+                       space = "Lab", 
+                       na.value ="grey", # Choose NA value
+                       guide = "colourbar", # Set color bar
+                       aesthetics = "fill") + # Select aesthetics to apply
+  labs(x = "Minimum Child Weight", y = "Max Depth", fill = "AUC") # Set labels
+g_2 # Generate plot
+
+# print error heatmap
+g_3 <- ggplot(res_db, aes(y = max_depth, x = min_child_weight, fill = error)) + # set aesthetics
+  geom_tile() + # Use geom_tile for heatmap
+  theme_bw() + # Set theme
+  scale_fill_gradient2(low = "blue", # Choose low color
+                       mid = "white", # Choose mid color
+                       high = "red", # Choose high color
+                       midpoint =mean(res_db$error), # Choose mid point
+                       space = "Lab", 
+                       na.value ="grey", # Choose NA value
+                       guide = "colourbar", # Set color bar
+                       aesthetics = "fill") + # Select aesthetics to apply
+  labs(x = "Minimum Child Weight", y = "Max Depth", fill = "Error") # Set labels
+g_3 # Generate plot
+
+res_db # Print results
+
+# The results of tuning all the combinations of max depth and minimum child weight show the highest AUC
+# with the lowest error when the max depth is 3 and minimum child weight is also 3. This has an AUC of
+# .89565 and error of 0.17387 on the train set.
+
+# Tune gamma hyperparameter
+gamma_vals <- c(0, 0.05, 0.1, 0.15, 0.2) # Create vector of gamma values
+
+set.seed(111111)
+auc_vec <- error_vec <- rep(NA, length(gamma_vals))
+for(i in 1:length(gamma_vals)){
+  bst_tune <- xgb.cv(data = OJ_train, # Set training data
+                     
+                     nfold = 5, # Use 5 fold cross-validation
+                     
+                     eta = 0.1, # Set learning rate
+                     max.depth = 3, # Set max depth
+                     min_child_weight = 3, # Set minimum number of samples in node to split
+                     gamma = gamma_vals[i], # Set minimum loss reduction for split
+                     
+                     
+                     
+                     nrounds = 100, # Set number of rounds
+                     early_stopping_rounds = 20, # Set number of rounds to stop at if there is no improvement
+                     
+                     verbose = 1, # 1 - Prints out fit
+                     nthread = 1, # Set number of parallel threads
+                     print_every_n = 20, # Prints out result every 20th iteration
+                     
+                     objective = "binary:logistic", # Set objective
+                     eval_metric = "auc", # Set evaluation metric to use
+                     eval_metric = "error") # Set evaluation metric to use
+  auc_vec[i] <- bst_tune$evaluation_log$test_auc_mean[bst_tune$best_ntreelimit]
+  error_vec[i] <- bst_tune$evaluation_log$test_error_mean[bst_tune$best_ntreelimit]
+  
+}
+
+# Join gamma to values
+cbind.data.frame(gamma_vals, auc_vec, error_vec)
+
+# Tuning above shows a gamma value of .10 has the lowest error with an accuracy of 0.89724, which is the second
+# highest of all the gammas with the lowest error metric score.
+
+# Create final model with tuned gamma, min_child_weight, and max.depth to achieve optimal prediction accuracy
+set.seed(111111)
+bst_final <- xgboost(data = OJ_train, # Set training data
+                     
+                     eta = 0.05, # Set learning rate
+                     max.depth = 3, # Set max depth
+                     min_child_weight = 3, # Set minimum number of samples in node to split
+                     gamma = 0.10, # Set minimum loss reduction for split
+                     
+                     nrounds = 100, # Set number of rounds
+                     early_stopping_rounds = 20, # Set number of rounds to stop at if there is no improvement
+                     
+                     verbose = 1, # 1 - Prints out fit
+                     nthread = 1, # Set number of parallel threads
+                     print_every_n = 20, # Prints out result every 20th iteration
+                     
+                     objective = "binary:logistic", # Set objective
+                     eval_metric = "auc",
+                     eval_metric = "error") # Set evaluation metric to use
+
+# Create predictions for xgboost model
+bst_preds_final <- predict(bst_final, OJ_test)
+
+# Make predicted probabilities a "1" or "0" based on a threshold (e.g., 0.5)
+xgbst_test_predictions_class <- ifelse(bst_preds_final > 0.5, "1", "0")
+
+xgbst_test_predictions_class <- as.numeric(xgbst_test_predictions_class)
+
+# Get the actual labels from the xgb.DMatrix object
+actual_labels <- as.numeric(testData_log$Purchase)
+
+# Convert the vectors to factors with the same levels
+xgbst_test_predictions_factor <- factor(xgbst_test_predictions_class, levels = c("0", "1"))
+actual_labels_factor <- factor(actual_labels, levels = c(0, 1))
+
+# Create a confusion matrix
+boost_confusion_matrix <- confusionMatrix(data = xgbst_test_predictions_factor, reference = actual_labels_factor)
+boost_confusion_matrix
+
+# Extract importance
+imp_mat <- xgb.importance(model = bst_final)
+# Plot importance (top 5 variables)
+xgb.plot.importance(imp_mat, top_n = 5)
+
+# Calculate final model ROC
+bst_roc = roc(actual_labels, xgbst_test_predictions_class)
+plot(bst_roc)
+auc <- auc(bst_roc)
+print(auc)
