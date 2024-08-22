@@ -1,4 +1,4 @@
-# Machine Learning Grad Class Final Project
+# Machine Learning Graduate Class Final Project
 My class was given the following business situation:
 You are a data scientist at a grocery store chain and are asked by management how to make the Orange Juice category perform better than what it does currently. You learn that the grocery store chain sells two brands of orange juice Citrus Hill (CH) and Minute Maid (MM). MM gets higher margins than CH. The Brand Manager is interested in finding out what variables influence a customer’s probability of buying MM. On the other hand, the sales manager is interested in building a predictive model in which he can simply predict the probability of a customer purchasing MM. They ask you to present a written report in which you clearly explain the method and your recommendations in a userfriendly manner.
 
