@@ -11,6 +11,6 @@ Questions from the Brand manager
 4. Based on your analysis what are the specific recommendations you have for the brand manager?
 
 Questions from the Sales manager
-1. Can you build a predictive model that can inform him the probability of customers buying MM?
+1. Can you build a predictive model that can inform him of the probability of customers buying MM?
 2. How good is the model in its predictions?
 3. How confident are you in your recommendations?
